@@ -1,66 +1,61 @@
 package workerpool
 
 import (
-    "sync"
+        "github.com/azyshalom/go-semaphore"
+        "sync"
 )
 
-type Func func(interface{})
-type Semaphore chan struct{}
-
-type Worker struct {
-    F Func
-    I interface{}
-}
+type Handler func(interface{})
 
 type WorkerPool struct {
-   stop    chan struct{}
-   queue   chan Worker
-   empty   Semaphore
-   wg      sync.WaitGroup
+        stop chan struct{}
+        pool chan interface{}
+        sem  *semaphore.Semaphore
+        wg   sync.WaitGroup
 }
 
-func NewWorkerPool(maxCount int) *WorkerPool {
-    ctx := &WorkerPool {
-        stop:    make(chan struct{}, 0),
-        queue:   make(chan Worker, maxCount),
-        empty:   make(Semaphore, maxCount),
-    }
-    for i := 0; i < maxCount; i++ {
-        ctx.empty <- struct{}{}
-    }
-    go ctx.start()
-    return ctx
+type workerItem struct {
+        handler   Handler
+        parameter interface{}
 }
 
-func (ctx *WorkerPool) Terminate() {
-    close(ctx.stop)
-    ctx.wg.Wait()
-}
-
-func (ctx *WorkerPool) Push(f Func, i interface{}) {
-    select {
-    case <-ctx.stop:
-        return
-    case <-ctx.empty:
-        ctx.queue <- Worker{f, i}
-    }
-}
-
-func (ctx *WorkerPool) start() {
-    for {
-        select {
-        case worker := <- ctx.queue:
-            go ctx.work(worker)
-        case <-ctx.stop:
-            return
+func New(maxSize int) *WorkerPool {
+        wp := &WorkerPool{
+                stop: make(chan struct{}),
+                pool: make(chan interface{}, maxSize),
+                sem:  semaphore.New(maxSize, maxSize),
         }
-    }
+        go wp.start()
+        return wp
 }
 
-func (ctx *WorkerPool) work(worker Worker) {
-    ctx.wg.Add(1)
-    defer ctx.wg.Done()
-    worker.F(worker.I)
-    ctx.empty <- struct{}{}
+func (wp *WorkerPool) Stop() {
+        close(wp.stop)
+        wp.wg.Wait()
 }
 
+func (wp *WorkerPool) Push(handler Handler, val interface{}) {
+        wp.sem.Wait()
+        wp.pool <- workerItem{handler: handler, parameter: val}
+}
+
+func (wp *WorkerPool) start() {
+        for {
+                select {
+                case i := <-wp.pool:
+                        go wp.work(i)
+                case <-wp.stop:
+                        return
+                }
+        }
+}
+
+func (wp *WorkerPool) work(i interface{}) {
+        wp.wg.Add(1)
+        defer wp.wg.Done()
+        w, ok := i.(workerItem)
+        if ok {
+                w.handler(w.parameter)
+        }
+        wp.sem.Post()
+}
